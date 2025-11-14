@@ -11,8 +11,8 @@
     "format:check": "prettier --check \"**/*.{js,json,md}\"",
     "test": "echo \"No tests yet\" && exit 0",
     "validate": "npm run lint:check && npm run format:check",
-    "package": "npm run validate && node scripts/package.js",
-    "build": "npm run generate-icons && npm run validate",
+    "build": "node scripts/build.js",
+    "release": "node scripts/release.js",
     "dev": "npm run generate-icons"
   },
   "repository": {

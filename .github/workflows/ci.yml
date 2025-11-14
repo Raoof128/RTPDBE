@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: Code Quality Checks
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run ESLint
+      run: npm run lint:check
+      continue-on-error: true
+
+    - name: Run Prettier
+      run: npm run format:check
+      continue-on-error: true
+
+  validate:
+    runs-on: ubuntu-latest
+    name: Validate Extension
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Validate manifest.json
+      run: |
+        if ! jq empty manifest.json 2>/dev/null; then
+          echo "manifest.json is not valid JSON"
+          exit 1
+        fi
+        echo "manifest.json is valid"
+
+    - name: Check required files
+      run: |
+        files=("manifest.json" "background.js" "content.js" "popup.html" "popup.js" "warning.html" "warning.js")
+        for file in "${files[@]}"; do
+          if [ ! -f "$file" ]; then
+            echo "Missing required file: $file"
+            exit 1
+          fi
+        done
+        echo "All required files present"
+
+    - name: Generate icons
+      run: node generate-icons.js
+
+    - name: Verify icons generated
+      run: |
+        if [ ! -f "icons/icon16.png" ] || [ ! -f "icons/icon48.png" ] || [ ! -f "icons/icon128.png" ]; then
+          echo "Icons not generated successfully"
+          exit 1
+        fi
+        echo "Icons generated successfully"
+
+  build:
+    runs-on: ubuntu-latest
+    name: Build Extension
+    needs: [lint, validate]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Generate icons
+      run: npm run generate-icons
+
+    - name: Create build artifact
+      run: |
+        mkdir -p build
+        cp manifest.json background.js content.js popup.* warning.* generate-icons.js build/
+        cp -r icons build/
+        cd build && zip -r ../rtpdbe-${{ github.sha }}.zip *
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: extension-build
+        path: rtpdbe-${{ github.sha }}.zip
+        retention-days: 30
+
+  security:
+    runs-on: ubuntu-latest
+    name: Security Scan
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run security audit
+      run: |
+        if [ -f "package-lock.json" ]; then
+          npm audit --audit-level=moderate
+        else
+          echo "No package-lock.json found, skipping audit"
+        fi
+      continue-on-error: true
