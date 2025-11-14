@@ -1,0 +1,51 @@
+{
+  "name": "rtpdbe",
+  "version": "1.0.1",
+  "description": "Real-Time Phishing Detection Browser Extension",
+  "main": "background.js",
+  "scripts": {
+    "generate-icons": "node generate-icons.js",
+    "lint": "eslint *.js --fix",
+    "lint:check": "eslint *.js",
+    "format": "prettier --write \"**/*.{js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{js,json,md}\"",
+    "test": "echo \"No tests yet\" && exit 0",
+    "validate": "npm run lint:check && npm run format:check",
+    "package": "npm run validate && node scripts/package.js",
+    "build": "npm run generate-icons && npm run validate",
+    "dev": "npm run generate-icons"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Raoof128/RTPDBE.git"
+  },
+  "keywords": [
+    "phishing",
+    "security",
+    "browser-extension",
+    "chrome-extension",
+    "cybersecurity",
+    "malware-detection",
+    "url-analysis",
+    "privacy",
+    "protection"
+  ],
+  "author": "RTPDBE Contributors",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Raoof128/RTPDBE/issues"
+  },
+  "homepage": "https://github.com/Raoof128/RTPDBE#readme",
+  "devDependencies": {
+    "eslint": "^8.50.0",
+    "prettier": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
+  },
+  "browser": {
+    "fs": false,
+    "path": false
+  }
+}
