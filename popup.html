@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phishing Detection</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 380px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #333;
+    }
+
+    .container {
+      background: white;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-size: 20px;
+      margin-bottom: 5px;
+    }
+
+    .header p {
+      font-size: 12px;
+      opacity: 0.9;
+    }
+
+    .status-section {
+      padding: 20px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .toggle-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 15px;
+    }
+
+    .toggle-label {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .toggle-switch {
+      position: relative;
+      width: 50px;
+      height: 26px;
+      background: #ccc;
+      border-radius: 13px;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+
+    .toggle-switch.active {
+      background: #4CAF50;
+    }
+
+    .toggle-slider {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 20px;
+      height: 20px;
+      background: white;
+      border-radius: 50%;
+      transition: transform 0.3s;
+    }
+
+    .toggle-switch.active .toggle-slider {
+      transform: translateX(24px);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+      padding: 20px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .stat-card {
+      background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+      padding: 15px;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 32px;
+      font-weight: bold;
+      color: #667eea;
+      margin-bottom: 5px;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .section {
+      padding: 20px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: #333;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .blocked-list {
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .blocked-item {
+      background: #fff3cd;
+      border-left: 3px solid #ffc107;
+      padding: 10px;
+      margin-bottom: 8px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .blocked-domain {
+      font-weight: 600;
+      color: #856404;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
+
+    .blocked-time {
+      font-size: 11px;
+      color: #666;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 30px 20px;
+      color: #999;
+      font-size: 14px;
+    }
+
+    .empty-icon {
+      font-size: 48px;
+      margin-bottom: 10px;
+    }
+
+    .actions {
+      padding: 15px 20px;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      margin-bottom: 10px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn-secondary {
+      background: #f5f5f5;
+      color: #333;
+    }
+
+    .btn-secondary:hover {
+      background: #e0e0e0;
+    }
+
+    .current-site {
+      background: #e3f2fd;
+      border-left: 3px solid #2196F3;
+      padding: 12px;
+      margin-bottom: 15px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .current-site-label {
+      font-weight: 600;
+      color: #1976D2;
+      margin-bottom: 5px;
+    }
+
+    .current-site-url {
+      color: #555;
+      word-break: break-all;
+    }
+
+    .site-status {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+
+    .site-status.safe {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .site-status.suspicious {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .site-status.dangerous {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #f1f1f1;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #888;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🛡️ Phishing Detection</h1>
+      <p>Real-Time Protection Active</p>
+    </div>
+
+    <div class="status-section">
+      <div class="toggle-container">
+        <span class="toggle-label">Protection Status</span>
+        <div class="toggle-switch active" id="protection-toggle">
+          <div class="toggle-slider"></div>
+        </div>
+      </div>
+
+      <div class="current-site" id="current-site">
+        <div class="current-site-label">Current Site</div>
+        <div class="current-site-url" id="current-url">Loading...</div>
+        <span class="site-status safe" id="site-status">✓ Safe</span>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-value" id="total-checks">0</div>
+        <div class="stat-label">Sites Checked</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="threats-blocked">0</div>
+        <div class="stat-label">Threats Blocked</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Recently Blocked Sites</div>
+      <div class="blocked-list" id="blocked-list">
+        <div class="empty-state">
+          <div class="empty-icon">🎉</div>
+          <div>No threats detected yet!</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-primary" id="clear-history">Clear History</button>
+      <button class="btn btn-secondary" id="whitelist-site">Whitelist Current Site</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
