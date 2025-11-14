@@ -1,286 +1,512 @@
-// Background Service Worker for Real-Time Phishing Detection
+/**
+ * Background Service Worker for Real-Time Phishing Detection
+ * Handles URL analysis, navigation monitoring, and threat detection
+ */
 
-// Initialize extension state
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.set({
-    enabled: true,
-    blockedSites: [],
-    whitelistedSites: [],
-    detectionStats: {
-      totalChecks: 0,
-      threatsBlocked: 0,
-      lastUpdate: Date.now()
-    }
-  });
-  console.log('Phishing Detection Extension installed');
-});
+'use strict';
+
+// Configuration constants
+const CONFIG = {
+  MAX_STORED_BLOCKED_SITES: 100,
+  SUSPICION_THRESHOLD: 50,
+  NAVIGATION_DEBOUNCE_MS: 100,
+  LEGITIMATE_DOMAIN_DISTANCE_THRESHOLD: 3
+};
 
 // Known phishing indicators database
 const PHISHING_KEYWORDS = [
   'verify', 'account', 'suspend', 'confirm', 'update', 'secure',
   'banking', 'paypal', 'amazon', 'signin', 'login', 'password',
-  'urgent', 'immediately', 'click here', 'verify your account'
+  'urgent', 'immediately', 'click here', 'verify your account',
+  'limited time', 'act now', 'suspended', 'unusual activity'
 ];
 
 const LEGITIMATE_DOMAINS = [
   'google.com', 'facebook.com', 'amazon.com', 'paypal.com',
   'microsoft.com', 'apple.com', 'netflix.com', 'instagram.com',
-  'twitter.com', 'linkedin.com', 'github.com', 'stackoverflow.com'
+  'twitter.com', 'linkedin.com', 'github.com', 'stackoverflow.com',
+  'reddit.com', 'wikipedia.org', 'youtube.com', 'gmail.com'
 ];
 
-// URL analysis functions
+const SUSPICIOUS_TLDS = [
+  '.tk', '.ml', '.ga', '.cf', '.gq', '.xyz', '.top', '.work',
+  '.click', '.link', '.download', '.racing', '.science'
+];
+
+// Debounce map for navigation events
+const navigationDebounce = new Map();
+
+/**
+ * Initialize extension state on installation
+ */
+chrome.runtime.onInstalled.addListener(async (details) => {
+  try {
+    const existingData = await chrome.storage.local.get([
+      'enabled',
+      'blockedSites',
+      'whitelistedSites',
+      'detectionStats'
+    ]);
+
+    // Only set defaults if not already set (preserve data on update)
+    const defaultData = {
+      enabled: existingData.enabled !== undefined ? existingData.enabled : true,
+      blockedSites: existingData.blockedSites || [],
+      whitelistedSites: existingData.whitelistedSites || [],
+      detectionStats: existingData.detectionStats || {
+        totalChecks: 0,
+        threatsBlocked: 0,
+        lastUpdate: Date.now()
+      }
+    };
+
+    await chrome.storage.local.set(defaultData);
+    await updateBadge();
+
+    if (details.reason === 'install') {
+      console.log('[Phishing Detection] Extension installed successfully');
+    } else if (details.reason === 'update') {
+      console.log(`[Phishing Detection] Extension updated to version ${chrome.runtime.getManifest().version}`);
+    }
+  } catch (error) {
+    console.error('[Phishing Detection] Installation error:', error);
+  }
+});
+
+/**
+ * Extract domain from URL with error handling
+ * @param {string} url - The URL to extract domain from
+ * @returns {string|null} - The domain or null if invalid
+ */
 function extractDomain(url) {
   try {
+    if (!url || typeof url !== 'string') return null;
     const urlObj = new URL(url);
-    return urlObj.hostname;
+    return urlObj.hostname.toLowerCase();
   } catch (e) {
     return null;
   }
 }
 
+/**
+ * Calculate Levenshtein distance between two strings
+ * Used for detecting lookalike domains
+ * @param {string} str1 - First string
+ * @param {string} str2 - Second string
+ * @returns {number} - Edit distance between strings
+ */
+function levenshteinDistance(str1, str2) {
+  const len1 = str1.length;
+  const len2 = str2.length;
+  const matrix = Array(len2 + 1).fill(null).map(() => Array(len1 + 1).fill(0));
+
+  for (let i = 0; i <= len1; i++) matrix[0][i] = i;
+  for (let j = 0; j <= len2; j++) matrix[j][0] = j;
+
+  for (let j = 1; j <= len2; j++) {
+    for (let i = 1; i <= len1; i++) {
+      const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      matrix[j][i] = Math.min(
+        matrix[j - 1][i] + 1,     // deletion
+        matrix[j][i - 1] + 1,     // insertion
+        matrix[j - 1][i - 1] + cost  // substitution
+      );
+    }
+  }
+
+  return matrix[len2][len1];
+}
+
+/**
+ * Check if domain is similar to a legitimate domain
+ * @param {string} domain - Domain to check
+ * @returns {Object|null} - Match info or null
+ */
+function checkLookalikeDomain(domain) {
+  if (!domain) return null;
+
+  for (const legitDomain of LEGITIMATE_DOMAINS) {
+    // Check for exact subdomain match (e.g., paypal.example.com)
+    if (domain.includes(legitDomain) && domain !== legitDomain) {
+      // Check if it's a suspicious subdomain usage
+      const parts = domain.split('.');
+      const legitParts = legitDomain.split('.');
+
+      // If legitimate domain appears in subdomain position, it's suspicious
+      if (domain.endsWith(legitDomain)) {
+        // e.g., fake-paypal.com vs paypal.com - legitimate subdomain
+        continue;
+      } else if (domain.includes(legitDomain + '.')) {
+        // e.g., paypal.com.fake.com - very suspicious
+        return {
+          domain: legitDomain,
+          reason: `Suspicious use of "${legitDomain}" in domain name`
+        };
+      }
+    }
+
+    // Check for typosquatting using edit distance
+    const distance = levenshteinDistance(domain, legitDomain);
+    if (distance > 0 && distance <= CONFIG.LEGITIMATE_DOMAIN_DISTANCE_THRESHOLD) {
+      return {
+        domain: legitDomain,
+        reason: `Very similar to legitimate domain "${legitDomain}" (typosquatting)`
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Analyze URL for phishing indicators
+ * @param {string} url - URL to analyze
+ * @returns {Object} - Analysis result with suspicion score and reasons
+ */
 function checkSuspiciousURL(url) {
   const domain = extractDomain(url);
-  if (!domain) return { suspicious: false, reasons: [] };
+  if (!domain) {
+    return { suspicious: false, suspicionScore: 0, reasons: [], domain: null };
+  }
 
   const reasons = [];
   let suspicionScore = 0;
 
-  // Check for IP address instead of domain
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(domain)) {
-    reasons.push('Uses IP address instead of domain name');
-    suspicionScore += 40;
-  }
-
-  // Check for excessive subdomains
-  const subdomains = domain.split('.');
-  if (subdomains.length > 4) {
-    reasons.push('Excessive number of subdomains');
-    suspicionScore += 20;
-  }
-
-  // Check for homograph attacks (lookalike characters)
-  if (/[а-яА-Я]/.test(domain)) {
-    reasons.push('Contains Cyrillic characters (possible homograph attack)');
-    suspicionScore += 50;
-  }
-
-  // Check for suspicious TLDs
-  const suspiciousTLDs = ['.tk', '.ml', '.ga', '.cf', '.gq', '.xyz', '.top'];
-  if (suspiciousTLDs.some(tld => domain.endsWith(tld))) {
-    reasons.push('Uses suspicious top-level domain');
-    suspicionScore += 30;
-  }
-
-  // Check for lookalike domains
-  LEGITIMATE_DOMAINS.forEach(legitDomain => {
-    if (domain.includes(legitDomain) && domain !== legitDomain) {
-      const distance = levenshteinDistance(domain, legitDomain);
-      if (distance < 3) {
-        reasons.push(`Lookalike domain similar to ${legitDomain}`);
-        suspicionScore += 60;
-      }
+  try {
+    // Check for IP address instead of domain
+    const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$|^\[?[0-9a-fA-F:]+\]?$/;
+    if (ipPattern.test(domain)) {
+      reasons.push('Uses IP address instead of domain name');
+      suspicionScore += 40;
     }
-  });
 
-  // Check for excessive hyphens
-  const hyphens = (domain.match(/-/g) || []).length;
-  if (hyphens > 2) {
-    reasons.push('Excessive hyphens in domain name');
-    suspicionScore += 15;
-  }
-
-  // Check for suspicious patterns
-  if (domain.match(/\d{5,}/)) {
-    reasons.push('Contains long numeric sequences');
-    suspicionScore += 20;
-  }
-
-  // Check URL length
-  if (url.length > 200) {
-    reasons.push('Extremely long URL');
-    suspicionScore += 25;
-  }
-
-  // Check for @ symbol (can hide real domain)
-  if (url.includes('@')) {
-    reasons.push('Contains @ symbol (possible URL obfuscation)');
-    suspicionScore += 50;
-  }
-
-  // Check for phishing keywords in URL
-  const lowerURL = url.toLowerCase();
-  let keywordMatches = 0;
-  PHISHING_KEYWORDS.forEach(keyword => {
-    if (lowerURL.includes(keyword)) {
-      keywordMatches++;
+    // Check for excessive subdomains (more than 4 parts)
+    const domainParts = domain.split('.');
+    if (domainParts.length > 4) {
+      reasons.push(`Excessive number of subdomains (${domainParts.length} levels)`);
+      suspicionScore += 20;
     }
-  });
-  if (keywordMatches >= 2) {
-    reasons.push(`Contains multiple phishing-related keywords (${keywordMatches})`);
-    suspicionScore += keywordMatches * 10;
+
+    // Check for homograph attacks (non-ASCII characters)
+    if (/[^\x00-\x7F]/.test(domain)) {
+      reasons.push('Contains non-ASCII characters (possible homograph attack)');
+      suspicionScore += 50;
+    }
+
+    // Check for suspicious TLDs
+    const hasSuspiciousTLD = SUSPICIOUS_TLDS.some(tld => domain.endsWith(tld));
+    if (hasSuspiciousTLD) {
+      const tld = SUSPICIOUS_TLDS.find(tld => domain.endsWith(tld));
+      reasons.push(`Uses suspicious top-level domain: ${tld}`);
+      suspicionScore += 30;
+    }
+
+    // Check for lookalike domains
+    const lookalike = checkLookalikeDomain(domain);
+    if (lookalike) {
+      reasons.push(lookalike.reason);
+      suspicionScore += 60;
+    }
+
+    // Check for excessive hyphens
+    const hyphenCount = (domain.match(/-/g) || []).length;
+    if (hyphenCount > 2) {
+      reasons.push(`Excessive hyphens in domain name (${hyphenCount})`);
+      suspicionScore += 15;
+    }
+
+    // Check for long numeric sequences
+    if (/\d{5,}/.test(domain)) {
+      reasons.push('Contains long numeric sequences');
+      suspicionScore += 20;
+    }
+
+    // Check URL length
+    if (url.length > 200) {
+      reasons.push(`Extremely long URL (${url.length} characters)`);
+      suspicionScore += 25;
+    }
+
+    // Check for @ symbol (URL obfuscation technique)
+    if (url.includes('@')) {
+      reasons.push('Contains @ symbol (possible URL obfuscation)');
+      suspicionScore += 50;
+    }
+
+    // Check for data: or javascript: URLs
+    if (url.startsWith('data:') || url.startsWith('javascript:')) {
+      reasons.push('Uses suspicious URL scheme');
+      suspicionScore += 70;
+    }
+
+    // Check for phishing keywords in URL
+    const lowerURL = url.toLowerCase();
+    const keywordMatches = PHISHING_KEYWORDS.filter(keyword =>
+      lowerURL.includes(keyword)
+    );
+
+    if (keywordMatches.length >= 2) {
+      reasons.push(`Contains ${keywordMatches.length} phishing-related keywords`);
+      suspicionScore += keywordMatches.length * 10;
+    }
+
+    // Check for shortened URLs (common in phishing)
+    const shortenerDomains = ['bit.ly', 'tinyurl.com', 'goo.gl', 't.co', 'ow.ly'];
+    if (shortenerDomains.some(shortener => domain.includes(shortener))) {
+      reasons.push('Uses URL shortening service');
+      suspicionScore += 10;
+    }
+
+  } catch (error) {
+    console.error('[Phishing Detection] Error analyzing URL:', error);
   }
 
   return {
-    suspicious: suspicionScore >= 50,
+    suspicious: suspicionScore >= CONFIG.SUSPICION_THRESHOLD,
     suspicionScore,
     reasons,
     domain
   };
 }
 
-// Levenshtein distance for similarity checking
-function levenshteinDistance(str1, str2) {
-  const matrix = [];
+/**
+ * Check if URL is whitelisted
+ * @param {string} url - URL to check
+ * @returns {Promise<boolean>} - True if whitelisted
+ */
+async function isWhitelisted(url) {
+  try {
+    const data = await chrome.storage.local.get(['whitelistedSites']);
+    const whitelist = data.whitelistedSites || [];
+    const domain = extractDomain(url);
 
-  for (let i = 0; i <= str2.length; i++) {
-    matrix[i] = [i];
+    if (!domain) return false;
+
+    // Check for exact domain match or parent domain match
+    return whitelist.some(whitelistedDomain => {
+      return domain === whitelistedDomain || domain.endsWith('.' + whitelistedDomain);
+    });
+  } catch (error) {
+    console.error('[Phishing Detection] Error checking whitelist:', error);
+    return false;
   }
+}
 
-  for (let j = 0; j <= str1.length; j++) {
-    matrix[0][j] = j;
-  }
+/**
+ * Check if URL should be skipped
+ * @param {string} url - URL to check
+ * @returns {boolean} - True if should skip
+ */
+function shouldSkipURL(url) {
+  if (!url || typeof url !== 'string') return true;
 
-  for (let i = 1; i <= str2.length; i++) {
-    for (let j = 1; j <= str1.length; j++) {
-      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1,
-          matrix[i][j - 1] + 1,
-          matrix[i - 1][j] + 1
-        );
+  const skipPrefixes = [
+    'chrome://',
+    'chrome-extension://',
+    'about:',
+    'edge://',
+    'brave://',
+    'vivaldi://',
+    'opera://'
+  ];
+
+  return skipPrefixes.some(prefix => url.startsWith(prefix));
+}
+
+/**
+ * Handle navigation events with debouncing
+ */
+chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+  try {
+    // Only check main frame navigations
+    if (details.frameId !== 0) return;
+
+    const url = details.url;
+    const tabId = details.tabId;
+
+    // Skip internal URLs
+    if (shouldSkipURL(url)) return;
+
+    // Debounce rapid navigation events
+    const debounceKey = `${tabId}-${url}`;
+    const now = Date.now();
+    const lastCheck = navigationDebounce.get(debounceKey);
+
+    if (lastCheck && (now - lastCheck) < CONFIG.NAVIGATION_DEBOUNCE_MS) {
+      return;
+    }
+    navigationDebounce.set(debounceKey, now);
+
+    // Clean old debounce entries (older than 5 seconds)
+    for (const [key, timestamp] of navigationDebounce.entries()) {
+      if (now - timestamp > 5000) {
+        navigationDebounce.delete(key);
       }
     }
-  }
 
-  return matrix[str2.length][str1.length];
-}
+    // Check if protection is enabled
+    const settings = await chrome.storage.local.get(['enabled']);
+    if (settings.enabled === false) return;
 
-// Check if site is whitelisted
-async function isWhitelisted(url) {
-  const data = await chrome.storage.local.get(['whitelistedSites']);
-  const whitelist = data.whitelistedSites || [];
-  const domain = extractDomain(url);
-  return whitelist.some(site => domain && domain.includes(site));
-}
+    // Check if whitelisted
+    if (await isWhitelisted(url)) {
+      return;
+    }
 
-// Monitor navigation events
-chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
-  if (details.frameId !== 0) return; // Only check main frame
+    // Analyze URL
+    const analysis = checkSuspiciousURL(url);
 
-  const data = await chrome.storage.local.get(['enabled']);
-  if (!data.enabled) return;
+    // Update statistics
+    const stats = await chrome.storage.local.get(['detectionStats']);
+    const currentStats = stats.detectionStats || {
+      totalChecks: 0,
+      threatsBlocked: 0,
+      lastUpdate: Date.now()
+    };
+    currentStats.totalChecks++;
+    currentStats.lastUpdate = Date.now();
 
-  const url = details.url;
+    if (analysis.suspicious) {
+      currentStats.threatsBlocked++;
 
-  // Skip chrome:// and extension URLs
-  if (url.startsWith('chrome://') || url.startsWith('chrome-extension://')) {
-    return;
-  }
+      // Store blocked site
+      const blocked = await chrome.storage.local.get(['blockedSites']);
+      const blockedSites = blocked.blockedSites || [];
 
-  // Check if whitelisted
-  if (await isWhitelisted(url)) {
-    return;
-  }
+      blockedSites.push({
+        url,
+        domain: analysis.domain,
+        reasons: analysis.reasons,
+        score: analysis.suspicionScore,
+        timestamp: Date.now()
+      });
 
-  // Analyze URL
-  const analysis = checkSuspiciousURL(url);
+      // Keep only recent blocked sites
+      const recentBlocked = blockedSites.slice(-CONFIG.MAX_STORED_BLOCKED_SITES);
 
-  // Update stats
-  const stats = await chrome.storage.local.get(['detectionStats']);
-  const currentStats = stats.detectionStats || { totalChecks: 0, threatsBlocked: 0 };
-  currentStats.totalChecks++;
+      await chrome.storage.local.set({
+        blockedSites: recentBlocked,
+        detectionStats: currentStats
+      });
 
-  if (analysis.suspicious) {
-    currentStats.threatsBlocked++;
+      // Redirect to warning page
+      const warningURL = chrome.runtime.getURL('warning.html') +
+        '?blocked=' + encodeURIComponent(url) +
+        '&reasons=' + encodeURIComponent(JSON.stringify(analysis.reasons)) +
+        '&score=' + analysis.suspicionScore;
 
-    // Store blocked site
-    const blocked = await chrome.storage.local.get(['blockedSites']);
-    const blockedSites = blocked.blockedSites || [];
-    blockedSites.push({
-      url,
-      domain: analysis.domain,
-      reasons: analysis.reasons,
-      score: analysis.suspicionScore,
-      timestamp: Date.now()
-    });
+      try {
+        await chrome.tabs.update(tabId, { url: warningURL });
+      } catch (updateError) {
+        console.error('[Phishing Detection] Error updating tab:', updateError);
+      }
 
-    await chrome.storage.local.set({
-      blockedSites: blockedSites.slice(-100), // Keep last 100
-      detectionStats: currentStats
-    });
-
-    // Redirect to warning page
-    chrome.tabs.update(details.tabId, {
-      url: chrome.runtime.getURL('warning.html') + '?blocked=' + encodeURIComponent(url) +
-           '&reasons=' + encodeURIComponent(JSON.stringify(analysis.reasons)) +
-           '&score=' + analysis.suspicionScore
-    });
-  } else {
-    await chrome.storage.local.set({ detectionStats: currentStats });
+      console.log(`[Phishing Detection] Blocked suspicious site: ${url} (score: ${analysis.suspicionScore})`);
+    } else {
+      // Update stats even for safe sites
+      await chrome.storage.local.set({ detectionStats: currentStats });
+    }
+  } catch (error) {
+    console.error('[Phishing Detection] Navigation handler error:', error);
   }
 });
 
-// Message handler for content script communication
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'analyzeContent') {
-    const contentAnalysis = analyzePageContent(request.data);
-    sendResponse({ analysis: contentAnalysis });
-  } else if (request.action === 'checkURL') {
-    const urlAnalysis = checkSuspiciousURL(request.url);
-    sendResponse({ analysis: urlAnalysis });
-  }
-  return true;
-});
-
-// Analyze page content for phishing indicators
+/**
+ * Analyze page content for phishing indicators
+ * @param {Object} data - Page analysis data from content script
+ * @returns {Object} - Analysis result
+ */
 function analyzePageContent(data) {
   let suspicionScore = 0;
   const warnings = [];
 
-  // Check for password input without HTTPS
-  if (data.hasPasswordField && !data.isHTTPS) {
-    warnings.push('Password field on non-HTTPS page');
-    suspicionScore += 60;
-  }
+  try {
+    // Check for password input without HTTPS
+    if (data.hasPasswordField && !data.isHTTPS) {
+      warnings.push('Password field on non-HTTPS page');
+      suspicionScore += 60;
+    }
 
-  // Check for suspicious form actions
-  if (data.hasSuspiciousFormAction) {
-    warnings.push('Form submits to external domain');
-    suspicionScore += 40;
-  }
+    // Check for suspicious form actions
+    if (data.hasSuspiciousFormAction) {
+      warnings.push('Form submits to external domain');
+      suspicionScore += 40;
+    }
 
-  // Check for excessive external links
-  if (data.externalLinksRatio > 0.7) {
-    warnings.push('High ratio of external links');
-    suspicionScore += 30;
-  }
+    // Check for excessive external links
+    if (data.externalLinksRatio !== undefined && data.externalLinksRatio > 0.7) {
+      warnings.push(`High ratio of external links (${Math.round(data.externalLinksRatio * 100)}%)`);
+      suspicionScore += 30;
+    }
 
-  // Check for hidden iframes
-  if (data.hasHiddenIframes) {
-    warnings.push('Contains hidden iframes');
-    suspicionScore += 50;
+    // Check for hidden iframes
+    if (data.hasHiddenIframes) {
+      warnings.push('Contains hidden iframes');
+      suspicionScore += 50;
+    }
+  } catch (error) {
+    console.error('[Phishing Detection] Content analysis error:', error);
   }
 
   return {
-    suspicious: suspicionScore >= 50,
+    suspicious: suspicionScore >= CONFIG.SUSPICION_THRESHOLD,
     suspicionScore,
     warnings
   };
 }
 
-// Badge update
+/**
+ * Message handler for content script and popup communication
+ */
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  try {
+    if (request.action === 'analyzeContent') {
+      const contentAnalysis = analyzePageContent(request.data);
+      sendResponse({ analysis: contentAnalysis });
+    } else if (request.action === 'checkURL') {
+      const urlAnalysis = checkSuspiciousURL(request.url);
+      sendResponse({ analysis: urlAnalysis });
+    } else {
+      sendResponse({ error: 'Unknown action' });
+    }
+  } catch (error) {
+    console.error('[Phishing Detection] Message handler error:', error);
+    sendResponse({ error: error.message });
+  }
+
+  return true; // Keep message channel open for async response
+});
+
+/**
+ * Update extension badge based on enabled state
+ */
 async function updateBadge() {
-  const data = await chrome.storage.local.get(['enabled', 'detectionStats']);
-  if (data.enabled) {
-    chrome.action.setBadgeText({ text: '' });
-    chrome.action.setBadgeBackgroundColor({ color: '#4CAF50' });
-  } else {
-    chrome.action.setBadgeText({ text: 'OFF' });
-    chrome.action.setBadgeBackgroundColor({ color: '#999999' });
+  try {
+    const data = await chrome.storage.local.get(['enabled']);
+    const enabled = data.enabled !== false; // Default to true
+
+    if (enabled) {
+      await chrome.action.setBadgeText({ text: '' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#4CAF50' });
+    } else {
+      await chrome.action.setBadgeText({ text: 'OFF' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#999999' });
+    }
+  } catch (error) {
+    console.error('[Phishing Detection] Badge update error:', error);
   }
 }
 
-// Update badge on startup
+/**
+ * Listen for storage changes to update badge
+ */
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes.enabled) {
+    updateBadge();
+  }
+});
+
+// Initialize badge on startup
 updateBadge();
+
+console.log('[Phishing Detection] Background service worker initialized');
